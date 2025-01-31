@@ -1,10 +1,11 @@
-#import "utility.typ": is-spider, is-edge, is-content
+#import "utility.typ": is-spider, is-edge, is-content, is-curve-element
 #import "spiders.typ": h
 
-#import "curve.typ": quad, cubic
+#import "curve.typ" as zx-curve
 
 #let vec-sub(x, y) = x.zip(y).map(((p, q)) => q - p)
 #let vec-add(x, y) = x.zip(y).map(((p, q)) => q + p)
+#let vec-inv(x) = x.map(q => -q)
 
 
 /// Evaluates a Bézier curve of any degree for a given curve 
@@ -153,6 +154,7 @@
   end
   
 ) = {
+  return start + end.filter(x => x != none)
   if start.len() == 2 {
     start.last() = vec-sub(..start.rev())
   }
@@ -213,6 +215,60 @@
   let handle = (calc.cos(angle), calc.sin(angle))
   
   (point, handle.map(x => x / 2 * strength))
+}
+
+#let process-direction(
+  /// -> angle | alignment | array
+  direction,
+
+  vertex
+
+) = {
+  if direction == auto { return none }
+  
+  let strength = 1
+  if type(direction) == array {
+    assert(direction.len() == 2)
+    for element in direction {
+      if type(element) in (angle, alignment) {
+        direction = element
+      } else if type(element) in (int, float) {
+        strength = element
+      } else {
+        assert(false)
+      }
+    }
+  }
+  let angle = direction-to-angle(direction)
+  let handle = (calc.cos(angle), calc.sin(angle))
+  vec-add(vertex, handle.map(x => x / 2 * strength))
+}
+
+/// Adds a Bézier handle to an end point
+#let maybe-add-bezier-handle2(
+
+  start, 
+  
+  /// Coordinates of the end point. 
+  /// -> array
+  end, 
+
+  /// Direction of the handle, given either as an `angle`,
+  /// an alignment or an array with one of these two and an
+  /// additional strength scalar. The order in the array does not 
+  /// matter. 
+  /// -> angle | alignment | array
+  from, 
+  
+  /// -> angle | alignment | array
+  to, 
+  
+) = {
+  if from == auto and to == auto { return end }
+  let control-start = process-direction(from)
+  let control-end = process-direction(to)
+
+  return (control-start, control-end, end)
 }
 
 
@@ -294,6 +350,32 @@
 }
 
 
+
+#let extract-spider(node) = {
+  if is-spider(node) {
+    return node
+  } else if is-curve-element(node) {
+    if is-spider(node.end.at(0)) {
+      return node.end.at(0)
+    }
+  }
+}
+
+
+#let ensure-curve-element(node) = {
+  if is-spider(node) {
+    node = zx-curve.line((node.x, node.y))
+  } else if is-curve-element(node) {
+    if is-spider(node.end.at(0)) {
+      node.end = (node.end.at(0).x, node.end.at(0).y)
+    }
+  } else if type(node) == array and type(node.first()) in (int, float) {
+    node = zx-curve.line(node)
+  }
+  return node
+}
+
+
 /// Creates a ZX-diagram. 
 #let diagram(
   
@@ -342,102 +424,85 @@
       } else if is-edge(item) { 
   
         let edge = item
-
-        spiders += edge.nodes.filter(node => type(node) == dictionary)
-
-        let retrieve-coordinates(node) = {
-          if type(node) == dictionary { 
-            (node.x, node.y) 
-          } else if type(node) == array and  type(node.at(0)) == dictionary {
-            let spider = node.at(0)
-            ((spider.x, spider.y),) + node.slice(1)
-          } else { 
-            node
-          }
-        }
-        
         let nodes = edge.nodes
-          .map(retrieve-coordinates)
 
-        if nodes.len() <= 1 { continue }  
-        if nodes.len() > 2 {
+        spiders += nodes.map(extract-spider).filter(x => x != none)
+
+
+        if edge.nodes.len() <= 1 { continue }  
+        if edge.nodes.len() > 2 {
           assert(edge.to == auto, message: "`zx.edge.to` should be `auto` when constructing edges between more than two nodes")
           assert(edge.from == auto, message: "`zx.edge.from` should be `auto` when constructing edges between more than two nodes")
         }
-        let previous = nodes.first()
-        let path-coords = ()
 
-        for node in nodes.slice(1) {
-            
-            let start = maybe-add-bezier-handle(previous, edge.from, invert: true)
-            let end = maybe-add-bezier-handle(node, edge.to)
-            
-            if "at" in edge {
-              spiders += h(
-                ..evaluate-bezier(
-                  ..bezier-coords-to-polygon(start, end), 
-                  t: edge.at
-                )
-              )
-            }
-
-            bounds = update-bounds(
-              bounds, ..bezier-coords-to-polygon(start, end)
-            )
-            if path-coords.len() == 0 {
-              path-coords.push(start)
-            }
-            path-coords.push(end)
-            previous = node
-  
+        
+        if edge.from != auto or edge.to != auto {
+          assert(not nodes.any(is-curve-element), message: "`zx.edge.to` and `zx.edge.from` should not be used with curve elements")
+          let extract-coord(node) = if is-spider(node) { (node.x, node.y) } else { node
         }
-        let point-to-coords = p => p.map(el => scale * el)
+          let (start, end) = nodes.map(extract-coord)
+          let control-start = process-direction(edge.from, start)
+          let control-end = process-direction(edge.to, end)
+          nodes = (
+            start,
+            zx-curve.cubic(control-start, control-end, end)
+          )
+        }
 
-        place(path(
-          ..path-coords.map(path-coord => path-coord.map(point-to-coords)),
-          stroke: stroke)
+        let curve-elements = nodes.map(ensure-curve-element)
+
+        let coords = curve-elements.map(
+          node => (node.control-start, node.control-end, node.end)
+        )
+
+        // Insert all automatic coordinates (symmetric handles)
+        for i in range(1, coords.len()) {
+          if coords.at(i).first() == auto {
+            let prev = coords.at(i - 1)
+            if prev.at(1) == none {
+              coords.at(i).first() = none
+              continue
+            }
+            let rel = vec-sub(prev.at(2), prev.at(1))
+            coords.at(i).first() = vec-sub(rel, prev.at(2))
+          }
+        }
+
+        coords = coords.map(el => el.filter(x => x != none))
+        
+        if "at" in edge { // is a Hadamard edge
+          spiders += coords.windows(2).map(
+            ((start, end)) => {
+              let pos = evaluate-bezier(start.last(), ..end, t: edge.at)
+              h(..pos)
+            }
+          ).join()
+        }
+        
+        
+        bounds = update-bounds(
+          bounds, ..coords.join()
         )
 
         
-        
-        // if type(from-points.first()) in (int, float) {
-        //   from-points = (from-points,)
-        // } else {
-        //   spiders += edge.a.filter(x => type(x) == dictionary)
-        // }
-        
-        // if type(to-points.first()) in (int, float) {
-        //   to-points = (to-points,)
-        // } else {
-        //   spiders += edge.b.filter(x => type(x) == dictionary)
-        // }
-        
-        let to-coord = node => if type(node) == dictionary { (node.x, node.y) } else { node }
-  
-        
-        // for start in from-points.map(to-coord) {
-        //   for end in to-points.map(to-coord) {
-            
-        //     if "at" in edge {
-        //       spiders += h(..evaluate-bezier(start, end, t: edge.at))
-        //     }
-  
-        //     start = maybe-add-bezier-handle(start, edge.from, invert: true)
-        //     end = maybe-add-bezier-handle(end, edge.to)
-            
-        //     bounds = update-bounds(
-        //       bounds, ..bezier-coords-to-polygon(start, end)
-        //     )
+        let apply-scaling = p => { p.map(el => scale * el) }
 
-        //     let point-to-coords = p => p.map(el => scale * el)
-        //     place(path(
-        //       start.map(point-to-coords), 
-        //       end.map(point-to-coords), 
-        //       stroke: stroke)
-        //     )
-            
-        //   }
-        // }
+        let curve-elements = coords.enumerate().map(
+          ((i, node)) => {
+            node = node.map(apply-scaling)
+            if i == 0 { curve.move(..node) }
+            else if node.len() == 1 { curve.line(..node) }
+            else if node.len() == 2 { curve.quad(..node) }
+            else if node.len() == 3 { curve.cubic(..node) }
+          }
+        )
+        
+
+        place(
+          curve(..curve-elements, stroke: stroke)
+        )
+
+
         
       } else {
         assert(false, message: "Unknown thing " + repr(item))
@@ -479,6 +544,7 @@
 
   block(
     // stroke: .1pt, 
+    breakable: false,
     width: bounds-pt.right - bounds-pt.left,
     height: bounds-pt.bottom - bounds-pt.top,
     move(
