@@ -1,0 +1,14 @@
+[package]
+name = "zed-ex"
+version = "0.1.0"
+entrypoint = "src/zed-ex.typ"
+authors = ["Mc-Zen <https://github.com/Mc-Zen>"]
+license = "MIT"
+description = "ZX-Calculus made quick."
+compiler = "0.13.0"
+
+repository = "https://github.com/Mc-Zen/zed-ex"
+keywords = ["quantum computing", "quantum information theory", "zx calculus", "zx-calculus"]
+categories = ["visualization"]
+disciplines = ["physics", "computer-science"
+exclude = ["/docs/*", "/tests/*"]
